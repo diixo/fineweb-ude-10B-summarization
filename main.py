@@ -13,13 +13,11 @@ MAX_INPUT_LEN = 3072
 #####################################################################################
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL, use_fast=True, local_files_only=True)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL,
-    local_files_only=True,
-    dtype=torch.float16,
-    device_map="cuda"
-).eval()
+model = AutoModelForCausalLM.from_pretrained(MODEL, local_files_only=True, dtype=torch.float16, device_map="cuda").eval()
+
 
 def make_prompt(text: str, max_words: int):
 
@@ -35,17 +33,34 @@ def make_prompt(text: str, max_words: int):
         enable_thinking=False
     )
 
+
 def rough_words_from_tokens(tok: int):
-    # грубая оценка: 1 token ~ 0.75 words для английского (приблизительно)
+    # rough estimate: 1 token ~ 0.75 words for english (approximately)
     return max(40, int(tok * 0.75))
+
 
 ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
 
 
 with open(out_path, "w", encoding="utf-8") as fout:
-    for ex in ds:
+    
+    for i, ex in enumerate(ds):
         text = ex["text"]
-        tok_in = int(ex.get("token_count", 0)) or len(tokenizer.encode(text))
+        tok_in = int(ex.get("token_count", 0))
+
+        if tok_in <= MAX_TOKENS:
+            rec = {
+                "id": i,
+                "src_id": ex["id"],
+                "url": ex.get("url"),
+                "dump": ex.get("dump"),
+                "score": ex.get("score"),
+                "int_score": ex.get("int_score"),
+                "token_count": tok_in,
+                "summary": text,
+            }
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            continue
 
         max_out   = min(MAX_TOKENS, max(64, int(0.30 * tok_in)))
         max_words = max(64, int(0.75 * max_out))
@@ -68,7 +83,9 @@ with open(out_path, "w", encoding="utf-8") as fout:
                 do_sample=True,
                 temperature=0.2,
                 top_p=0.9,
-                repetition_penalty=1.05
+                repetition_penalty=1.05,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
             )
 
         gen_only = out_ids[0, input_len:]
@@ -78,21 +95,24 @@ with open(out_path, "w", encoding="utf-8") as fout:
 
         tok_sum = len(tokenizer.encode(summary))
         if tok_sum >= tok_in:
-            continue
+            summary = text
 
         rec = {
-            "id": ex["id"],
+            "id": i,
+            "src_id": ex["id"],
             "url": ex.get("url"),
             "dump": ex.get("dump"),
             "score": ex.get("score"),
             "int_score": ex.get("int_score"),
             "token_count": tok_in,
             "summary": summary,
-            "summary_token_count": tok_sum,
-            "compression_ratio": tok_sum / max(1, tok_in),
         }
         fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    
-        exit(0)
+
+        if i % 100 == 0:
+            fout.flush()
+
+        print("Processed id:", ex["id"], "Input tokens:", tok_in)
+
 
 print("Wrote:", out_path)
