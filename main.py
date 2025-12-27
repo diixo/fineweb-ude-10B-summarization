@@ -1,16 +1,25 @@
-
-import json, math
+import json
+import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-MAX_TOKENS = 128
+MAX_TOKENS = 256
 MODEL = "models/Qwen3-1.7B"
+
+out_path = "fineweb_edu_summaries.jsonl"
+MAX_INPUT_LEN = 3072
+
+#####################################################################################
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL, use_fast=True, local_files_only=True)
 
-llm = LLM(model=MODEL, dtype="auto", device="cuda")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL,
+    local_files_only=True,
+    dtype=torch.float16,
+    device_map="cuda"
+).eval()
 
 def make_prompt(text: str, max_words: int):
 
@@ -32,61 +41,58 @@ def rough_words_from_tokens(tok: int):
 
 ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
 
-batch_prompts, batch_meta = [], []
-BATCH = 64
 
-out_path = "fineweb_edu_summaries.jsonl"
-fout = open(out_path, "w", encoding="utf-8")
+with open(out_path, "w", encoding="utf-8") as fout:
+    for ex in ds:
+        text = ex["text"]
+        tok_in = int(ex.get("token_count", 0)) or len(tokenizer.encode(text))
 
-# параметры генерации: низкая температура => меньше болтовни
-sampling = SamplingParams(
-    temperature=0.2,
-    top_p=0.9,
-    max_tokens=MAX_TOKENS,
-    presence_penalty=1.0
-)
+        max_out   = min(MAX_TOKENS, max(64, int(0.30 * tok_in)))
+        max_words = max(64, int(0.75 * max_out))
 
-for ex in ds:
-    text = ex["text"]
-    tok_in = int(ex.get("token_count", 0)) or len(tokenizer.encode(text))
+        prompt = make_prompt(text, max_words)
 
-    # лимит на слова и выходные токены
-    max_out   = min(MAX_TOKENS, max(64, int(0.30 * tok_in)))
-    max_words = max(64, int(0.75 * max_out))   # без верхнего cap, но с нижним
+        enc = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=MAX_INPUT_LEN
+        ).to(model.device)
 
-    prompt = make_prompt(text, max_words)
+        input_len = enc["input_ids"].shape[1]
 
-    batch_prompts.append(prompt)
-    batch_meta.append((ex, tok_in, max_out))
+        with torch.inference_mode():
+            out_ids = model.generate(
+                **enc,
+                max_new_tokens=max_out,
+                do_sample=True,
+                temperature=0.2,
+                top_p=0.9,
+                repetition_penalty=1.05
+            )
 
-    if len(batch_prompts) >= BATCH:
-        # обновляем max_tokens под “средний” батч или делай 1 запрос = 1 запись
-        sampling.max_tokens = max(m[2] for m in batch_meta)
+        gen_only = out_ids[0, input_len:]
+        summary = tokenizer.decode(gen_only, skip_special_tokens=True).strip()
+        if not summary:
+            continue
 
-        outs = llm.generate(batch_prompts, sampling)
-        for out, (orig, tok_in, max_out_i) in zip(outs, batch_meta):
-            summary = out.outputs[0].text.strip()
-            tok_sum = len(tokenizer.encode(summary))
+        tok_sum = len(tokenizer.encode(summary))
+        if tok_sum >= tok_in:
+            continue
 
-            # жёсткое правило “должно быть короче”
-            if tok_sum >= tok_in:
-                continue
+        rec = {
+            "id": ex["id"],
+            "url": ex.get("url"),
+            "dump": ex.get("dump"),
+            "score": ex.get("score"),
+            "int_score": ex.get("int_score"),
+            "token_count": tok_in,
+            "summary": summary,
+            "summary_token_count": tok_sum,
+            "compression_ratio": tok_sum / max(1, tok_in),
+        }
+        fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    
+        exit(0)
 
-            rec = {
-                "id": orig["id"],
-                "url": orig.get("url"),
-                "dump": orig.get("dump"),
-                "score": orig.get("score"),
-                "int_score": orig.get("int_score"),
-                "token_count": tok_in,
-                "summary": summary,
-                "summary_token_count": tok_sum,
-                "compression_ratio": tok_sum / max(1, tok_in),
-            }
-            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-        batch_prompts.clear()
-        batch_meta.clear()
-
-fout.close()
 print("Wrote:", out_path)
