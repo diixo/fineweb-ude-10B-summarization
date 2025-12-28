@@ -2,13 +2,16 @@ import json
 import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
 
 
 MAX_TOKENS = 256
 MODEL = "models/Qwen3-1.7B"
 
 out_path = "fineweb_edu_summaries.jsonl"
-MAX_INPUT_LEN = 3072
+MAX_INPUT_LEN = 4096
+
+# 10BT = 9_953_989_344
 
 #####################################################################################
 
@@ -38,22 +41,26 @@ def rough_words_from_tokens(tok: int):
     # rough estimate: 1 token ~ 0.75 words for english (approximately)
     return max(40, int(tok * 0.75))
 
+#ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
+ds = load_dataset("parquet", data_files="data/fineweb-edu-10BT/*.parquet", split="train", streaming=True)
 
-ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
-
+tokens_processed = 0
 
 with open(out_path, "w", encoding="utf-8") as fout:
     
     for i, ex in enumerate(ds):
+
+        if i % 100 == 0:
+            fout.flush()
+
         text = ex["text"]
         tok_in = int(ex.get("token_count", 0))
+        tokens_processed += tok_in
 
         if tok_in <= MAX_TOKENS:
             rec = {
                 "id": i,
                 "src_id": ex["id"],
-                "url": ex.get("url"),
-                "dump": ex.get("dump"),
                 "score": ex.get("score"),
                 "int_score": ex.get("int_score"),
                 "token_count": tok_in,
@@ -91,6 +98,7 @@ with open(out_path, "w", encoding="utf-8") as fout:
         gen_only = out_ids[0, input_len:]
         summary = tokenizer.decode(gen_only, skip_special_tokens=True).strip()
         if not summary:
+            print(f"Skip item:[{i}]")
             continue
 
         tok_sum = len(tokenizer.encode(summary))
@@ -100,8 +108,6 @@ with open(out_path, "w", encoding="utf-8") as fout:
         rec = {
             "id": i,
             "src_id": ex["id"],
-            "url": ex.get("url"),
-            "dump": ex.get("dump"),
             "score": ex.get("score"),
             "int_score": ex.get("int_score"),
             "token_count": tok_in,
@@ -109,10 +115,7 @@ with open(out_path, "w", encoding="utf-8") as fout:
         }
         fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        if i % 100 == 0:
-            fout.flush()
-
-        print("Processed id:", ex["id"], "Input tokens:", tok_in)
+        print(f"Processed [{i}] [{tokens_processed}]...", ex["id"], "Input tokens:", tok_in)
 
 
 print("Wrote:", out_path)
