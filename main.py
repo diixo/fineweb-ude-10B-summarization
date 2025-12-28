@@ -51,6 +51,7 @@ with open(out_path, "w", encoding="utf-8") as fout:
     for i, ex in enumerate(ds):
 
         if i % 100 == 0:
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fout.flush()
 
         text = ex["text"]
@@ -113,7 +114,6 @@ with open(out_path, "w", encoding="utf-8") as fout:
             "token_count": tok_in,
             "summary": summary,
         }
-        fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         print(f"Processed [{i}] [{tokens_processed}]...", ex["id"], "Input tokens:", tok_in)
 
