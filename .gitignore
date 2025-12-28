@@ -3,5 +3,6 @@ wandb/
 __py*
 *.log
 
+data/*
 models/*
 *summaries.jsonl

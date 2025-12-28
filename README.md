@@ -1,1 +1,1 @@
-# fineweb-ude-10B-summarization
+# fineweb-edu-10B-summarization
